@@ -182,7 +182,7 @@ def get_sleep(user_id: str, start_date: str, end_date: str) -> pd.DataFrame:
     return df
 
 
-SIGNALS = ("red", "ir", "green", "accel_x", "accel_y", "accel_z")
+SIGNALS = ("green", "accel_x", "accel_y", "accel_z")
 def fetch_all_signals(user_id: str, start_time, end_time) -> pd.DataFrame:
     """Fetch each signal separately, outer-join on timestamp, save a single CSV.
 
@@ -217,43 +217,3 @@ def fetch_all_signals(user_id: str, start_time, end_time) -> pd.DataFrame:
         signals = pd.merge(signals, fw, on='timestamp', how='outer')
 
     return signals.sort_values('timestamp').reset_index(drop=True)
-
-
-def find_ppg_periods(df: pd.DataFrame, max_gap_ms: float = 1000.0, min_mean_fs_hz: float = 26.0) -> pd.DataFrame:
-    """Continuous spans where green is sampled at ~32 Hz.
-
-    Breaks a period whenever the gap between consecutive green samples
-    exceeds `max_gap_ms`. Drops spans whose mean rate is below `min_mean_fs_hz`.
-
-    `df` needs 'timestamp' (ms) and 'green'. Returns one row per period:
-    start_ms, end_ms, duration_s.
-    """
-    g = df.loc[df["green"].notna(), ["timestamp"]].copy()
-    g["timestamp"] = pd.to_numeric(g["timestamp"], errors="coerce")
-    g = g.dropna().astype({"timestamp": "int64"}).sort_values("timestamp")
-    ts = g["timestamp"].to_numpy()
-    if ts.size < 2:
-        return pd.DataFrame(
-            columns=["start_ms", "end_ms" "duration_s"]
-        )
-
-    diffs = np.diff(ts)
-    break_idx = np.where(diffs > max_gap_ms)[0] + 1
-    starts = np.concatenate(([0], break_idx))
-    ends = np.concatenate((break_idx, [ts.size]))
-
-    rows = []
-    for s, e in zip(starts, ends):
-        n = int(e - s)
-        if n < 2:
-            continue
-        dur_s = float((ts[e - 1] - ts[s]) / 1000.0)
-        mean_fs = (n - 1) / dur_s if dur_s > 0 else 0.0
-        if mean_fs < min_mean_fs_hz:
-            continue
-        rows.append({
-            "start_ms": int(ts[s]),
-            "end_ms": int(ts[e - 1]),
-            "duration_s": dur_s,
-        })
-    return pd.DataFrame(rows)
