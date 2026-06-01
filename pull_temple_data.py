@@ -14,8 +14,6 @@ CH_PASSWORD = "qwerty123"
 CF_AppSession = "3361ec228a3833fb"
 CF_Authorization = "eyJhbGciOiJSUzI1NiIsImtpZCI6IjkxNWYwMzIyZDI4NDU5Njc5NjVlZmU4MDY0NjliMzY4MTE1YzlhZjY5Yzg5YWMxM2IzODQwYWQ4YmVmZjdjMWMifQ.eyJhdWQiOlsiNGM5NjMxMDdmZDFmMmZkMDY5OTMwNDMwYjRmMGNkMGFiN2Y3NGMxYzM4ZGQwMzhiYmM1MmI2MTg4NTZjNGNkYSJdLCJlbWFpbCI6ImFyY2hpc2hAdGVtcGxlLmNvbSIsImV4cCI6MTc4MjUwMjEzOSwiaWF0IjoxNzc5ODc0MTM5LCJuYmYiOjE3Nzk4NzQxMzksImlzcyI6Imh0dHBzOi8vY29udGludWUtbGlmZXNjaWVuY2VzLmNsb3VkZmxhcmVhY2Nlc3MuY29tIiwidHlwZSI6ImFwcCIsImlkZW50aXR5X25vbmNlIjoiRGRTbjBvWEF5ajRrMVZlTCIsInN1YiI6IjU1MTUwNzNiLTM3MGEtNTk3NC1hYWQyLTBiOTYzZmEzZjJkNyIsImNvdW50cnkiOiJJTiIsInBvbGljeV9pZCI6IjUwNTQ3ZmEyLWE0OTEtNGRkOS1iZTkwLThjNzc0NzIxMjFhYyJ9.l2G59XaYItgHX0TxynWYkB4m_LZWgvLTRM7eOjnqbmwE3JRZscnWvY3voTLvFgyFYErkBnr7DaAaH0b4fnKFUQhvBEoJTJ8tHaYx5IYCImMp0dyWtV9q-UUf1p7Vj_VMiAX05_mky9ub70TU-Nj4naBCqKVySVyYii-E6NiI99f7QLecEZrYYXUn8zVg_1lea7CK3XrB58Ox5Aiy7E0Uh2kYJOXY7Z9RTfVcY-wm4MHR1IvUKHNesO5bFcMw7Y0ue-2BUar69AgckQSzHsuuKuzlEmraDMHK298xS5to1GBZVNLBXKq2IYDZkvTKs61w1CoF_8gFGDQP_1dsRqMu5g"
 
-SIGNALS = ("red", "ir", "green", "accel_x", "accel_y", "accel_z")
-
 
 def run_clickhouse_query(query: str) -> pd.DataFrame:
     url = f"https://{CH_HOST}:{CH_PORT}"
@@ -64,7 +62,7 @@ def get_user_id_by_email(email: str) -> str | None:
     return str(df.iloc[0]["user_id"])
 
 
-def get_firmware_hr(user_id: str, start_time: str, end_time: str) -> pd.DataFrame:
+def fetch_hr(user_id: str, start_time: str, end_time: str) -> pd.DataFrame:
     """Return per-second firmware HR signals for `user_id` between start_time
     and end_time (IST) as a DataFrame with columns
     ['time_ist', 'firmware_hr', 'hr_confidence', 'reporting_mitigated'].
@@ -132,113 +130,6 @@ def fetch_signal(user_id, start_time, end_time, signal):
     return run_clickhouse_query(query)
 
 
-def fetch_minute_sampled_signals(start_time: str, end_time: str,
-                                  query_path: str = "query.sql") -> pd.DataFrame:
-    """Run the long-format minute-sampled-user query (query.sql) against the same
-    ClickHouse cluster used by fetch_signal. Returns a DataFrame with columns
-    ['user_id', 'timestamp', 'time_ist', 'signal', 'value'].
-
-    `start_time` / `end_time` are 'YYYY-MM-DD HH:MM:SS' (Asia/Kolkata).
-    """
-    sql = Path(query_path).read_text()
-    sql = sql.replace("{{start_dt}}", start_time).replace("{{end_dt}}", end_time)
-    df = run_clickhouse_query(sql)
-    if df.empty:
-        return df
-    df['timestamp'] = pd.to_numeric(df['timestamp'], errors='coerce').astype('int64')
-    df['time_ist'] = pd.to_datetime(df['time_ist'])
-    df['value'] = pd.to_numeric(df['value'], errors='coerce')
-    return df
-
-
-def fetch_all_signals(user_id: str, start_time, end_time) -> pd.DataFrame:
-    """Fetch each signal separately, outer-join on timestamp, save a single CSV.
-
-    Outer join means: rows with matching timestamps are merged into one row;
-    rows with timestamps unique to a signal are appended with NaN elsewhere.
-    Green-bearing rows are augmented with the closest firmware HR sample;
-    accel-only rows leave `firmware_hr` as NaN.
-    """
-    dfs = []
-    for signal in SIGNALS:
-        df = fetch_signal(user_id, start_time, end_time, signal)
-
-        if df.empty:
-            continue
-        df['timestamp'] = pd.to_numeric(df['timestamp'], errors='coerce').astype('int64')
-        dfs.append(df)
-
-    if not dfs:
-        return pd.DataFrame()
-
-    merged = dfs[0]
-    for df in dfs[1:]:
-        merged = pd.merge(merged, df, on='timestamp', how='outer')
-
-    g = merged.loc[merged['green'].notna(), ['timestamp', 'green']]
-    a = merged.loc[(merged['accel_x'].notna() & merged['accel_y'].notna() & merged['accel_z'].notna()), ['timestamp', 'accel_x', 'accel_y', 'accel_z']]
-
-    matched = pd.merge_asof(
-        g,
-        a[['timestamp']].rename(columns={'timestamp': 'accel_ts'}),
-        left_on='timestamp',
-        right_on='accel_ts',
-        tolerance=50,
-        direction='nearest',
-    )
-    matched = matched.dropna(subset=['accel_ts'])
-
-    keep_green_ts = set(matched['timestamp'])
-
-    # Keep any accel sample within ±15s of a kept green timestamp so each
-    # window has 15s of pre/post accel context for std/preroll analysis.
-    PAD_MS = 15_000
-    kept_green_arr = np.fromiter(keep_green_ts, dtype=np.int64, count=len(keep_green_ts))
-    kept_green_arr.sort()
-    a_sorted = a.sort_values('timestamp').reset_index(drop=True)
-    a_ts = a_sorted['timestamp'].to_numpy()
-    nearest_idx = np.searchsorted(kept_green_arr, a_ts)
-    left = np.clip(nearest_idx - 1, 0, len(kept_green_arr) - 1)
-    right = np.clip(nearest_idx, 0, len(kept_green_arr) - 1)
-    nearest_dist = np.minimum(
-        np.abs(a_ts - kept_green_arr[left]),
-        np.abs(a_ts - kept_green_arr[right]),
-    ) if len(kept_green_arr) else np.full(len(a_ts), PAD_MS + 1, dtype=np.int64)
-    keep_accel_ts = set(a_ts[nearest_dist <= PAD_MS].tolist())
-
-    merged = merged[
-        (merged['green'].notna() & merged['timestamp'].isin(keep_green_ts))
-        | (merged['accel_z'].notna() & merged['timestamp'].isin(keep_accel_ts))
-    ].reset_index(drop=True)
-
-    fw = get_firmware_hr(user_id, start_time, end_time)
-    if not fw.empty:
-        fw_t = pd.to_datetime(fw['time_ist'])
-        if fw_t.dt.tz is None:
-            fw_t = fw_t.dt.tz_localize('Asia/Kolkata')
-        fw_ms = (fw_t.dt.tz_convert('UTC').astype('int64') // 1_000_000)
-        fw_small = pd.DataFrame({
-            'timestamp': fw_ms.to_numpy(),
-            'firmware_hr': fw['firmware_hr'].to_numpy(),
-            'hr_confidence': fw['hr_confidence'].to_numpy(),
-        }).sort_values('timestamp').reset_index(drop=True)
-
-        green_ts = (merged.loc[merged['green'].notna(), ['timestamp']]
-                          .sort_values('timestamp')
-                          .reset_index(drop=True))
-        if not green_ts.empty:
-            green_hr = pd.merge_asof(
-                green_ts, fw_small, on='timestamp', direction='nearest'
-            )
-            merged = merged.merge(green_hr, on='timestamp', how='left')
-        else:
-            merged['firmware_hr'] = float('nan')
-    else:
-        merged['firmware_hr'] = float('nan')
-
-    return merged
-
-
 def get_sleep(user_id: str, start_date: str, end_date: str) -> pd.DataFrame:
     """Return main-sleep start/end (local time) for `user_id` between
     start_date and end_date (inclusive, IST calendar dates).
@@ -291,65 +182,78 @@ def get_sleep(user_id: str, start_date: str, end_date: str) -> pd.DataFrame:
     return df
 
 
-def get_deep_sleep(user_id: str, start_date: str, end_date: str) -> pd.DataFrame:
-    """Return deep-sleep stage windows for `user_id` between start_date and
-    end_date (inclusive, IST calendar dates).
+SIGNALS = ("red", "ir", "green", "accel_x", "accel_y", "accel_z")
+def fetch_all_signals(user_id: str, start_time, end_time) -> pd.DataFrame:
+    """Fetch each signal separately, outer-join on timestamp, save a single CSV.
 
-    `start_date` / `end_date` are 'YYYY-MM-DD' strings.
-    Returns DataFrame with columns
-    ['sleep_date', 'stage_start', 'stage_end', 'duration_s'] — one row per
-    deep-sleep span recorded by the firmware sleep metric.
+    Outer join means: rows with matching timestamps are merged into one row;
+    rows with timestamps unique to a signal are appended with NaN elsewhere.
+    Green-bearing rows are augmented with the closest firmware HR sample;
+    accel-only rows leave `firmware_hr` as NaN.
     """
-    query = f"""
-    WITH base AS (
-        SELECT
-            pk,
-            sk,
-            argMax(data, event_time) AS latest_json
-        FROM dynamodb.prod_consumer_service
-        WHERE pk = 'USER_METRIC#{user_id}#METRIC_TYPE#firmware-sleep_metric'
-          AND sk LIKE 'SLEEP#main_sleep#TIMESTAMP#%'
-          AND toTimeZone(
-                fromUnixTimestamp64Milli(toInt64OrZero(splitByChar('#', sk)[-1])),
-                'Asia/Kolkata'
-              ) BETWEEN toDateTime('{start_date} 00:00:00', 'Asia/Kolkata')
-                    AND toDateTime('{end_date} 23:59:59', 'Asia/Kolkata')
-        GROUP BY pk, sk
-    ),
-    sleep_base AS (
-        SELECT
-            JSONExtractString(latest_json, 'Date') AS dt,
-            JSONExtractRaw(
-                arrayFirst(x -> JSONExtractString(x, 'type') = 'deep_sleep',
-                           JSONExtractArrayRaw(latest_json, 'Stages')),
-                'time_windows'
-            ) AS deep_sleep_windows_json
-        FROM base
-    )
-    SELECT
-        toDate(stage_start) AS sleep_date,
-        stage_start,
-        stage_end,
-        dateDiff('second', stage_start, stage_end) AS duration_s
-    FROM (
-        SELECT
-            dt,
-            toTimeZone(fromUnixTimestamp64Milli(toInt64(JSONExtractString(event, 'start_time'))),
-                       'Asia/Kolkata') AS stage_start,
-            toTimeZone(fromUnixTimestamp64Milli(toInt64(JSONExtractString(event, 'end_time'))),
-                       'Asia/Kolkata') AS stage_end
-        FROM sleep_base
-        ARRAY JOIN JSONExtractArrayRaw(deep_sleep_windows_json) AS event
-    )
-    ORDER BY stage_start
+    dfs = []
+    for signal in SIGNALS:
+        df = fetch_signal(user_id, start_time, end_time, signal)
+
+        if df.empty:
+            continue
+        df['timestamp'] = pd.to_numeric(df['timestamp'], errors='coerce').astype('int64')
+        dfs.append(df)
+
+    if not dfs:
+        return pd.DataFrame()
+
+    signals = dfs[0]
+    for df in dfs[1:]:
+        signals = pd.merge(signals, df, on='timestamp', how='outer')
+
+    fw = fetch_hr(user_id, start_time, end_time)
+    if not fw.empty:
+        fw = fw.copy()
+        fw['timestamp'] = (
+            fw['time_ist'].dt.tz_localize('Asia/Kolkata').astype('int64') // 1_000_000
+        )
+        fw = fw.drop(columns=['time_ist'])
+        signals = pd.merge(signals, fw, on='timestamp', how='outer')
+
+    return signals.sort_values('timestamp').reset_index(drop=True)
+
+
+def find_ppg_periods(df: pd.DataFrame, max_gap_ms: float = 1000.0, min_mean_fs_hz: float = 26.0) -> pd.DataFrame:
+    """Continuous spans where green is sampled at ~32 Hz.
+
+    Breaks a period whenever the gap between consecutive green samples
+    exceeds `max_gap_ms`. Drops spans whose mean rate is below `min_mean_fs_hz`.
+
+    `df` needs 'timestamp' (ms) and 'green'. Returns one row per period:
+    start_ms, end_ms, duration_s.
     """
-    df = run_clickhouse_query(query)
-    if df.empty:
-        return df
+    g = df.loc[df["green"].notna(), ["timestamp"]].copy()
+    g["timestamp"] = pd.to_numeric(g["timestamp"], errors="coerce")
+    g = g.dropna().astype({"timestamp": "int64"}).sort_values("timestamp")
+    ts = g["timestamp"].to_numpy()
+    if ts.size < 2:
+        return pd.DataFrame(
+            columns=["start_ms", "end_ms" "duration_s"]
+        )
 
-    df['sleep_date'] = pd.to_datetime(df['sleep_date']).dt.date
-    df['stage_start'] = pd.to_datetime(df['stage_start'])
-    df['stage_end'] = pd.to_datetime(df['stage_end'])
-    df['duration_s'] = pd.to_numeric(df['duration_s'], errors='coerce')
-    return df
+    diffs = np.diff(ts)
+    break_idx = np.where(diffs > max_gap_ms)[0] + 1
+    starts = np.concatenate(([0], break_idx))
+    ends = np.concatenate((break_idx, [ts.size]))
 
+    rows = []
+    for s, e in zip(starts, ends):
+        n = int(e - s)
+        if n < 2:
+            continue
+        dur_s = float((ts[e - 1] - ts[s]) / 1000.0)
+        mean_fs = (n - 1) / dur_s if dur_s > 0 else 0.0
+        if mean_fs < min_mean_fs_hz:
+            continue
+        rows.append({
+            "start_ms": int(ts[s]),
+            "end_ms": int(ts[e - 1]),
+            "duration_s": dur_s,
+        })
+    return pd.DataFrame(rows)
