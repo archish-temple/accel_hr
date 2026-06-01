@@ -104,10 +104,7 @@ class PeakPicking:
 
 
 
-def predict_hr_accel(accel, last_hr):
-    accel_x = accel['accel_x'].to_numpy()    
-    accel_y = accel['accel_y'].to_numpy()    
-    
+def predict_hr_accel(accel_x, accel_y):    
     # Bandpass
     accel_x = SignalProcessing.filter_accel(accel_x)
     accel_y = SignalProcessing.filter_accel(accel_y)
@@ -127,18 +124,14 @@ def predict_hr_accel(accel, last_hr):
     # Peaks
     peaks_mag = PeakPicking.find_all_peaks_acf(acf_mag, lag_step)
     peaks_pca = PeakPicking.find_all_peaks_acf(acf_pca, lag_step)
-    peaks = sorted(peaks_mag + peaks_pca)
+    peaks = np.array(list(peaks_mag) + list(peaks_pca))
+    return peaks
+    if peaks.size == 0:
+        return float(last_hr)
+    # return float(peaks[np.argmin(np.abs(peaks - last_hr))])
 
-    return float(peaks[np.argmin(np.abs(peaks - last_hr))])
 
-
-def predict_hr_ppg(ppg, accel):
-    green = ppg['green'].to_numpy()
-
-    
-    # Resample PPG Signal 
-    t_ppg_ms   = ppg['timestamp'].to_numpy()
-    t_accel_ms = accel['timestamp'].to_numpy()
+def predict_hr_ppg(green, t_ppg_ms, t_accel_ms):
     green = np.interp(t_accel_ms, t_ppg_ms, green)
 
     # Bandpass

@@ -10,9 +10,9 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-DATA_DIR = Path(__file__).parent / "sleep" / "data"
+DATA_DIR = Path(__file__).parent / "sleep" / "raw_data"
 TZ = "Asia/Kolkata"
-PPG_SIGNALS = ["red", "ir", "green"]
+PPG_SIGNALS = ["green"]
 ACCEL_SIGNALS = ["accel_x", "accel_y", "accel_z"]
 SIGNALS = PPG_SIGNALS + ACCEL_SIGNALS
 DEFAULT_SIGNALS = {"green", "accel_x", "accel_y"}
